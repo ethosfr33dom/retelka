@@ -15,14 +15,34 @@ SYSTEM_PROMPT = """
 async def root():
     return {"ok": True}
 
-@app.websocket("/llm-websocket")
-async def llm_websocket(ws: WebSocket):
+@app.websocket("/llm-websocket/{call_id}")
+async def llm_websocket(ws: WebSocket, call_id: str):
     await ws.accept()
+
+    await ws.send_json({
+        "response_type": "response",
+        "response_id": 0,
+        "content": "",
+        "content_complete": True,
+        "end_call": False
+    })
+
     try:
         while True:
             req = await ws.receive_json()
             interaction_type = req.get("interaction_type")
+
             if interaction_type == "update_only":
+                continue
+
+            if interaction_type == "ping_pong":
+                await ws.send_json({
+                    "response_type": "ping_pong",
+                    "timestamp": req.get("timestamp")
+                })
+                continue
+
+            if interaction_type not in ["response_required", "reminder_required"]:
                 continue
 
             transcript = req.get("transcript", [])
@@ -31,7 +51,10 @@ async def llm_websocket(ws: WebSocket):
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             for turn in transcript:
                 role = "assistant" if turn.get("role") == "agent" else "user"
-                messages.append({"role": role, "content": turn.get("content", "")})
+                messages.append({
+                    "role": role,
+                    "content": turn.get("content", "")
+                })
 
             completion = client.chat.completions.create(
                 model="qwen/qwen3-32b",
@@ -40,19 +63,24 @@ async def llm_websocket(ws: WebSocket):
                 max_tokens=180,
             )
 
-            text = completion.choices[0].message.content.strip()
+            text = (completion.choices[0].message.content or "").strip()
+            if not text:
+                text = "Подскажите, пожалуйста, ещё раз."
 
             await ws.send_json({
+                "response_type": "response",
                 "response_id": response_id,
                 "content": text,
                 "content_complete": True,
                 "end_call": False
             })
+
     except WebSocketDisconnect:
         return
     except Exception:
         try:
             await ws.send_json({
+                "response_type": "response",
                 "response_id": 0,
                 "content": "Извините, связь прервалась. Давайте попробуем позже.",
                 "content_complete": True,
